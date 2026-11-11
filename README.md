@@ -39,6 +39,33 @@
 <!-- The path a submission takes, from arriving to the label a reader sees.
      Six or seven steps — this is the trace you wrote in Milestone 1. -->
 
+1. **Arrives.** A client sends `POST /submit` with JSON `{"text": "...", "creator_id": "..."}`.
+2. **Checked.** The route rejects a missing, empty, or oversized `text` with a `400` instead
+   of crashing, and assigns the submission a fresh `content_id`.
+3. **Signal one — the model signal.** gpt2, running locally, measures the text's perplexity
+   (how predictable it is). `detector.model_signal` squashes that onto 0–1 as `model_score`,
+   where higher means more AI-like.
+4. **Signal two — the style signal.** `stylometry.style_signal` measures the text's *shape*,
+   not its meaning: how much sentence length varies, how much vocabulary repeats, and how
+   much and what kind of punctuation it uses. That becomes `style_score`, 0–1, higher = more
+   AI-like.
+5. **Combine.** `scoring.combine_signals` turns the two scores into one confidence score.
+6. **Label.** `scoring.score_to_label` maps that score to one of three outcomes —
+   high-confidence human, unsure, high-confidence AI — with a sentence written for the
+   writer, not for an engineer.
+7. **Logged and returned.** The decision, both signal scores, and the label go to
+   `logs/audit.jsonl`, and the writer gets the response. If they think it's wrong, they call
+   `POST /appeal` with the `content_id`; that's recorded in the log and the item moves to
+   `under_review` for a human to look at.
+
+**The writer I followed through it.** Someone writing in their second language, who sticks
+to common words in short, plain sentences because those are the ones they're sure of. At
+step 3, gpt2 finds their text very predictable and scores it AI-like. At step 4, their even
+sentence lengths and narrow vocabulary *also* look machine-like. Both signals fail in the
+same direction, so no combining rule at step 5 can rescue them — averaging only helps when
+the signals disagree. The only thing standing between this writer and a wrong accusation is
+the wording of the label at step 6 and the appeal path at step 7.
+
 
 
 ---
@@ -53,19 +80,35 @@
 
 ### Signal one — the model signal
 
-**What it measures:**
+**What it measures:** How predictable the text is to a language model (gpt2), measured as
+perplexity and squashed onto 0–1. Low perplexity → high score → more AI-like.
 
-**Why that might differ between human and AI writing:**
+**Why that might differ between human and AI writing:** A language model writes by
+repeatedly picking a likely next word, so its output is text a model finds easy to predict.
+People make odd word choices, take abrupt turns, and reach for the specific rather than the
+typical — which surprises the model.
 
-**What it can't see:**
+**What it can't see:** Who actually wrote it. Predictability isn't authorship. Plain human
+writing — a second-language writer, a younger writer, anyone writing simply on purpose —
+scores about as machine-like as machine writing. And the reverse: AI text prompted to use
+rare words or ornate phrasing surprises gpt2 and slips through as "human."
 
 ### Signal two — the style signal
 
-**What it measures:**
+**What it measures:** The shape of the text without reading it: how much sentence length
+varies, how varied the vocabulary is (type–token ratio), and how much and what kind of
+punctuation is used.
 
-**Why that might differ between human and AI writing:**
+**Why that might differ between human and AI writing:** Generated prose tends toward even,
+mid-length sentences and a narrower band of vocabulary, because that's what "most likely next
+word" produces on average. Human writing is lumpier — a three-word sentence next to a
+forty-word one, a dash, a semicolon, a fragment.
 
-**What it can't see:**
+**What it can't see:** Meaning. It has no idea what the text says, so anything that changes
+the shape without changing the substance moves it: adding typos, chopping sentences up,
+pasting in a quotation, sprinkling in dashes. That's cheap to do on purpose. It also can't
+tell type–token ratio changes caused by *length* from ones caused by authorship — short texts
+look more varied just because they're short.
 
 ### The combining rule
 
