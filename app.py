@@ -201,12 +201,49 @@ def submit():
     """
     payload = request.get_json(silent=True) or {}
 
-    # TODO: delete this and build the route.
+    # the body has to be a JSON object, like {"text": ...}.
+    if not isinstance(payload, dict):
+        return jsonify({
+            "error": "bad_request",
+            "message": 'Send a JSON object like {"text": "...", "creator_id": "..."}.',
+        }), 400
+
+    text = payload.get("text")
+    creator_id = payload.get("creator_id")
+
+    # Check 1: text must exist and be a string.
+    # This covers missing, null (both give None), and numbers/lists.
+    if not isinstance(text, str):
+        return jsonify({
+            "error": "bad_request",
+            "message": "'text' is required and must be a string.",
+        }), 400
+
+    # Check 2: not empty or just whitespace.
+    if not text.strip():
+        return jsonify({
+            "error": "bad_request",
+            "message": "'text' is empty — send some writing to check.",
+        }), 400
+
+    # Check 3: not enormous.
+    if len(text) > config.MAX_TEXT_CHARS:
+        return jsonify({
+            "error": "bad_request",
+            "message": f"'text' is too long — the limit is {config.MAX_TEXT_CHARS} characters.",
+        }), 400
+
+    # creator_id is optional; fall back to "anonymous" if it's missing or not a string.
+    if not isinstance(creator_id, str) or not creator_id.strip():
+        creator_id = "anonymous"
+
+    content_id = str(uuid.uuid4())
+
     return jsonify({
-        "content_id": "fake1",
+        "content_id": content_id,
         "guess": "human",
         "confidence": 0.7,
-        "label": "okay",
+        "label": "placeholder label",
         "model_score": 1,
         "style_score": 1,
     })
