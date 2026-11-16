@@ -154,7 +154,7 @@ def health():
 # ── YOU BUILD THIS ────────────────────────────────────────────────────────────
 
 @app.post("/submit")
-# @limiter.limit(f"{config.RATE_LIMIT_PER_MINUTE}/minute;{config.RATE_LIMIT_PER_DAY}/day")
+@limiter.limit(f"{config.RATE_LIMIT_PER_MINUTE}/minute;{config.RATE_LIMIT_PER_DAY}/day")
 def submit():
     """
     Take a piece of text, decide about it, log the decision, answer.
@@ -203,41 +203,38 @@ def submit():
     """
     payload = request.get_json(silent=True) or {}
 
+    # Who sent it, worked out first so even a refused request names its caller
+    # in the log. Optional; "anonymous" if missing or not a string.
+    creator_id = payload.get("creator_id") if isinstance(payload, dict) else None
+    if not isinstance(creator_id, str) or not creator_id.strip():
+        creator_id = "anonymous"
+
+    def refuse(reason, message, code=400):
+        """Refuse the request AND leave a trace — a refusal is evidence too."""
+        audit.log_rejection(creator_id=creator_id, reason=reason, http_status=code)
+        return jsonify({"error": "bad_request", "message": message}), code
+
     # the body has to be a JSON object, like {"text": ...}.
     if not isinstance(payload, dict):
-        return jsonify({
-            "error": "bad_request",
-            "message": 'Send a JSON object like {"text": "...", "creator_id": "..."}.',
-        }), 400
+        return refuse("not_a_json_object",
+                      'Send a JSON object like {"text": "...", "creator_id": "..."}.')
 
     text = payload.get("text")
-    creator_id = payload.get("creator_id")
 
     # Check 1: text must exist and be a string.
     # This covers missing, null (both give None), and numbers/lists.
     if not isinstance(text, str):
-        return jsonify({
-            "error": "bad_request",
-            "message": "'text' is required and must be a string.",
-        }), 400
+        return refuse("text_missing_or_not_string",
+                      "'text' is required and must be a string.")
 
     # Check 2: not empty or just whitespace.
     if not text.strip():
-        return jsonify({
-            "error": "bad_request",
-            "message": "'text' is empty — send some writing to check.",
-        }), 400
+        return refuse("text_empty", "'text' is empty — send some writing to check.")
 
     # Check 3: not enormous.
     if len(text) > config.MAX_TEXT_CHARS:
-        return jsonify({
-            "error": "bad_request",
-            "message": f"'text' is too long — the limit is {config.MAX_TEXT_CHARS} characters.",
-        }), 400
-
-    # creator_id is optional; fall back to "anonymous" if it's missing or not a string.
-    if not isinstance(creator_id, str) or not creator_id.strip():
-        creator_id = "anonymous"
+        return refuse("text_too_long",
+                      f"'text' is too long — the limit is {config.MAX_TEXT_CHARS} characters.")
 
     content_id = str(uuid.uuid4())
 
@@ -246,7 +243,7 @@ def submit():
         model_score = detector.model_signal(text)
     except ValueError as exc:
         # Too short to score (under 3 tokens): the caller's problem, so 400.
-        return jsonify({"error": "bad_request", "message": str(exc)}), 400
+        return refuse("text_too_short", str(exc))
     except detector.DetectorUnavailable as exc:
         # Model not downloaded or failed to load: our problem, so 503.
         return jsonify({"error": "detector_unavailable", "message": str(exc)}), 503

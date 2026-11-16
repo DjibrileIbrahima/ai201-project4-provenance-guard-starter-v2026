@@ -354,47 +354,104 @@ to `under_review`.
 
 ## Rate Limiting
 
-**My limits:** ___ per minute, ___ per day
+**My limits:** 5 per minute, 60 per day, on `/submit` only (set in `config.py`, applied by
+the `@limiter.limit` decorator on `app.py::submit`).
 
 **Why those numbers and not others:**
-<!-- Think about two people: a real writer submitting their own work a few
-     times an hour, and a script sending a thousand variations to map your
-     thresholds. Your numbers have to be liveable for the first and hostile to
-     the second. -->
 
-**What a caller counts as:** <!-- per address, or per creator_id? They fail
-differently — one script can look like a thousand callers, and one household
-can look like one. -->
+A real writer pastes a piece, reads the label, maybe fixes something and resubmits. That's
+two or three submissions in a minute at the very most, and a handful in a day. Five a minute
+leaves them headroom, so a writer never sees the limit.
+
+A script trying to map my thresholds is a different shape. To find where 0.40 and 0.75 sit,
+it needs hundreds of slightly changed versions of the same text, sent as fast as possible.
+At 5 a minute and 60 a day, what would take minutes takes weeks per account. I didn't go
+lower than 5 because a writer who hits a `429` on their third try will assume the site is
+broken. I didn't go higher than 60 a day because nobody honestly has 60 pieces of their own
+to check in one day.
+
+`/appeal` isn't limited. An appeal is the writer's way out of a wrong accusation, and
+blocking it would hurt exactly the person the service most needs to protect.
+
+**What a caller counts as:** Their `creator_id`. A request with no usable `creator_id` falls
+back to the IP address (`app.py::rate_limit_key`). I chose `creator_id` because many real
+writers can share one address, like a school, a library, or a household, and limiting by
+address would block all of them because of one person.
+
+The cost: `creator_id` is whatever the caller says it is. A script that makes up a new
+`creator_id` for every request looks like a thousand different writers and is never
+limited. That's the same reason the attack set never trips my limit, since every attack row
+uses its own `attacker_<id>`. See **What's Still Broken**.
+
+Rejections leave a trace. A `429` is logged by the error handler in `app.py`, and every
+refused input (`400`) is logged by `submit`'s `refuse` helper. Both use
+`audit.log_rejection`, which writes the same nine fields as a decision, with the decision
+fields set to `null` and a `reason` added.
 
 **The run of status codes when I pushed past it:**
 
-<!-- python run_attacks.py --flood 15 -->
+`python run_attacks.py --flood 15`: 15 submissions from one `creator_id` (`flood_tester`)
+in a burst. Output from `run_attacks.py::run_flood`, also saved to
+`results/flood_2026-11-16_0242.md`:
 
 ```
+200 200 200 200 200 429 429 429 429 429 429 429 429 429 429
+```
 
+10 of 15 were rate limited. The first five got through, which matches the limit of 5 a
+minute exactly, and every request after that got a `429`.
+
+Each `429` left a trace. Here is one of the ten rejections from `logs/audit.jsonl`, with
+the same nine fields as a decision:
+
+```json
+{"timestamp": "2026-11-16T07:42:21+00:00", "content_id": null, "creator_id": "flood_tester", "guess": null, "model_score": null, "style_score": null, "combined_score": null, "label": null, "status": "rejected", "event": "rejected", "reason": "rate_limited", "limit": "5 per 1 minute"}
 ```
 
 ---
 
 ## Attack Run — Before
 
-<!-- Every attack with its outcome and a held-or-broke mark.
-     `run_attacks.py --label before` produces the table. -->
+<!-- TODO: python run_attacks.py --set <attack folder> --label before
+     Paste the main table from results/attack_run_<date>_before.md here, then
+     fill in every blank Verdict yourself:
+       - evasion (AI text built to look human): HELD if it came back "ai" or
+         "unsure", BROKE if "human".
+         NOTE: my combining rule caps disagreement at "unsure" ON PURPOSE, so
+         an evasion landing on "unsure" counts as HELD. Say that once here.
+       - false_positive (real human writing): HELD if "human" or "unsure",
+         BROKE if "ai". These are the ones that matter most.
+       - malformed requests: HELD if 4xx with a readable message, BROKE on 5xx.
+       - flood_same_creator: HELD if some come back 429. -->
 
+TODO: attack table
 
+**How I judged held vs. broke:** An evasion attack *broke* only if it got labelled
+**human**. My combining rule deliberately sends disagreement to "unsure", and "unsure"
+never accuses anyone, so evasion that lands there counts as held. A false-positive attack
+*broke* if a genuine human text got labelled **AI**. A malformed request broke if it got
+anything other than a `4xx` with a readable message.
 
 **Ten audit log entries from the run**
 
-<!-- Choose entries that show the interesting failures, not the ten easiest. -->
+<!-- TODO: curl "http://127.0.0.1:5000/log?limit=200" > results/audit_extract.json
+     Choose ten that show something: every false_positive labelled "ai", every
+     evasion labelled "human", one or two malformed-request rejections, and one
+     rate_limited rejection if the flood family tripped. -->
 
 ```json
-
+TODO: ten entries
 ```
 
 **The single worst outcome** — the one I'd least want to explain to a writer
 whose work got caught by it:
 
+<!-- TODO: pick the false_positive input with the HIGHEST combined score
+     labelled "ai". Write 2-3 sentences: what the text was, both signal
+     scores, and why both signals agreed it was AI (my guess from unit 7:
+     short even sentences + common words — the second-language writer). -->
 
+TODO
 
 ---
 
@@ -402,19 +459,36 @@ whose work got caught by it:
 
 <!-- Your five criteria across three trials. `run_eval.py --label before`. -->
 
+<!-- TODO: fill MY_WRITING in scenarios.py, then: python run_eval.py --label before
+     Each Run cell in results/run_<date>_before.md is already summarized
+     (label counts, mean score, statuses). Copy the relevant number in.
+     A target must hold in ALL THREE runs to be a MET. -->
+
 | Criterion | Target | Run 1 | Run 2 | Run 3 | Verdict |
 |---|---|---|---|---|---|
-| 1.  |  |  |  |  |  |
-| 2.  |  |  |  |  |  |
-| 3.  |  |  |  |  |  |
-| 4.  |  |  |  |  |  |
-| 5.  |  |  |  |  |  |
+| 1. Wrong accusations on my writing | ≤ 1 of 10 labelled AI | TODO | TODO | TODO | TODO |
+| 2. AI vs human spread | AI mean − human mean ≥ 0.30 | TODO | TODO | TODO | TODO |
+| 3. All labels reachable | each label ≥ 1×, ≥ 2 of 3 borderline → unsure | TODO | TODO | TODO | TODO |
+| 4. Appeals recorded | 5/5 appeals land + fake id 404s with 0 log entries | TODO | TODO | TODO | TODO |
+| 5. Bad input refused | 4/4 get 4xx, 0 get 500, `/ping` still 200 | TODO | TODO | TODO | TODO |
+
+How each was tested: criteria 1, 2, 3 and 5 by `run_eval.py::main` against the inputs in
+`scenarios.py`. Criterion 2 is the AI-set mean minus the human-set mean from the same trial.
+For criterion 4, I extended `run_eval.py` with `run_appeals`. It submits each text, appeals
+it with the real `content_id`, checks `GET /log` for the appeal entry, and then appeals a
+made-up id and counts the log entries before and after.
 
 **Real output from one trial**, pasted as text, naming the file and function
 that produced it:
 
-```json
+<!-- TODO: paste one trial's JSON block from results/run_<date>_before.md.
+     The appeal trial is a good one: it shows content_id, status, in_log. -->
 
+Produced by `run_eval.py::main` (the appeal rows by `run_eval.py::run_appeals`), calling
+`app.py::submit` and `app.py::appeal`:
+
+```json
+TODO
 ```
 
 **Diagnoses**
@@ -433,43 +507,112 @@ that produced it:
 
      Look for a pattern. Five failures on one signal is one problem, not five. -->
 
+<!-- DRAFT DIAGNOSES — these are PREDICTIONS from my unit 7 calibration.
+     Keep only the ones the run confirms, put the real counts and attack IDs in,
+     and delete any that didn't happen. Add one for anything unexpected.
 
+     A. Plain human writing labelled AI (false_positive family, maybe criterion 1)
+        Stage: signal one AND signal two together, then the combining rule.
+        Mechanism: gpt2 finds common words in simple order very predictable,
+        so model_score is high. The same text has short, even sentences and little
+        expressive punctuation, so style_score is high too. The signals AGREE,
+        so my disagreement cap never fires, and the 0.5/0.5 average lands above
+        0.75. The cap only protects writers when the signals split.
+        Check: in the logs, both scores should be above about 0.7 on these rows.
+
+     B. AI text with typos or rare words labelled human/unsure (evasion family)
+        Stage: signal one, then the combining rule.
+        Mechanism: typos and unusual words are tokens gpt2 didn't expect, so
+        perplexity jumps and model_score drops (0.114 on my typo test). The style signal
+        still says AI, but the gap is ≥ 0.4, so the cap pulls it to "unsure" at most,
+        and if model_score is low enough the average falls under 0.40 → "human".
+        Check: model_score low, style_score high, gap ≥ 0.4.
+
+     C. AI text chopped into uneven sentences / extra dashes and semicolons
+        Stage: signal two.
+        Mechanism: sentence-length spread is 0.5 of my style score and
+        expressive punctuation 0.3. Both are pure shape, so changing the shape
+        without touching the words drags style_score down.
+
+     D. Criterion 2 spread (if missed)
+        Stage: signal one on MY writing. If my own prose is plain, its
+        model_score is high, which narrows the gap. Same mechanism as A. -->
+
+TODO: write the confirmed diagnoses here, each naming the stage and the mechanism.
 
 ---
 
 ## The Improvement
 
-**What I changed:**
+<!-- DO THIS AFTER the "before" runs, not before. Recommended fix if
+     diagnosis A is confirmed (it targets the costliest failure):
 
-**Which diagnosis pointed at it:**
+       config.py: AI_THRESHOLD = 0.75  →  0.85
+
+     That's one line. The disagreement cap follows automatically because it's
+     AI_THRESHOLD - 0.01. From unit 7 calibration: the plain human paragraph
+     (0.831) moves to "unsure", and both clear-AI texts (0.876, 0.937) stay "ai".
+     The cost: lightly edited AI between 0.75 and 0.85 now lands on "unsure".
+     Also update the Label Variants table ranges (0.40 – 0.85, 0.85 – 1.00).
+
+     Then: python run_attacks.py --set <folder> --label after
+           python run_eval.py --label after
+     WAIT A MINUTE between runs or restart app.py so the rate-limit counters reset. -->
+
+**What I changed:** TODO, e.g. raised `AI_THRESHOLD` in `config.py` from 0.75 to 0.85, so
+"high-confidence AI" now needs a combined score of 0.85.
+
+**Which diagnosis pointed at it:** TODO, e.g. diagnosis A. The false positives came from the
+two signals *agreeing* on plain writing at about 0.8. The disagreement cap can't help there,
+so the only lever left was how high a score has to be before I accuse anyone.
 
 ### Attack Run — After
 
-<!-- Same format. `run_attacks.py --label after` -->
+<!-- TODO: same format, from results/attack_run_<date>_after.md -->
 
-
+TODO: attack table after
 
 **Did it help, and how do I know:**
 
-<!-- Widening the unsure band usually fixes one problem and creates another.
-     Reporting that trade honestly is worth full credit. -->
+<!-- TODO: compare before vs after BY FAMILY with counts:
+       - false_positive labelled "ai": before N → after M
+       - evasion labelled "ai": before N → after M (expect this to DROP)
+     Be honest about the trade: fewer accusations, and fewer catches. -->
 
-
+TODO
 
 ---
 
 ## What's Still Broken
 
-<!-- For each attack still getting through and each criterion still missed:
-     what you'd do, and why you stopped. -->
+<!-- TODO: one paragraph per attack still getting through and per missed
+     criterion. Candidates I already know about: -->
 
+**Rotating `creator_id` walks straight past the rate limit.** The limit is per
+`creator_id`, and the caller picks that freely. One script with a new id per request is
+never limited. The fix is a second, looser limit per IP address next to the per-creator one
+(for example 30 a minute per address), plus real accounts so `creator_id` can't be made up. I
+stopped there because the attack set and `run_eval.py` both send everything from
+`127.0.0.1`, so an address limit would have rate-limited my own test runs.
 
+**Writers whose two signals agree wrongly.** No combining rule can rescue a text when both
+signals are fooled the same way. A real fix is a third signal that measures something
+neither of mine does. Until then, the label wording and the appeal path are what protect
+these writers. TODO: confirm with the after-run counts.
+
+**Evasion by typos or rare words.** TODO: confirm from the run. This is a blind spot of
+signal one that I chose to accept. Catching it would mean trusting the style signal more,
+and the style signal is the one fooled by uneven sentences in genuine human writing.
+
+**In-memory rate-limit storage.** A restart forgets every count, and two copies of the
+service wouldn't share limits. A real deployment would point `RATE_LIMIT_STORAGE` at Redis.
 
 **The trade I'd make if this ran for real:**
 
-<!-- Two sentences. Fewer wrong accusations means more AI text getting through.
-     Say which way you'd go and WHO PAYS FOR IT. -->
-
+I'd accept more AI text getting through in exchange for fewer wrong accusations. The site
+and its readers pay for that in some undetected AI writing. Writers, and especially plain
+and second-language writers, stop paying for my detector's blind spots with their
+reputation.
 
 
 <!-- ═════════════════════════════════════════════════════════════════════
