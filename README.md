@@ -342,9 +342,11 @@ to `under_review`.
 - *What came back:* Code, plus calibration numbers on six texts. The calibration showed that
   type–token ratio runs the opposite way from the textbook assumption, and that my plain human
   paragraph is labelled AI by both signals at once.
-- *What I changed:* <!-- TODO (you): fill this in honestly. Something you reworded, a number
-  you moved, or a label you rewrote. If you changed nothing, say what you checked and why you
-  kept it. -->
+- *What I changed:* I used AI to help me understand the existing starter code (how
+  `detector.py` turns perplexity into a score, and what `audit.py` logs), then to help write
+  the remaining functions and test them. I checked the draft by running it myself: submitting
+  texts with curl, confirming all three labels show up, and making sure an appeal moves the
+  item to `under_review` and a fake `content_id` gets a `404`.
 
 <!-- ═══════════════════════ UNIT 8 — THE TEST ═══════════════════════ -->
 
