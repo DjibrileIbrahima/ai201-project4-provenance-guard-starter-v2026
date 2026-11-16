@@ -40,8 +40,9 @@
      Six or seven steps — this is the trace you wrote in Milestone 1. -->
 
 1. **Arrives.** A client sends `POST /submit` with JSON `{"text": "...", "creator_id": "..."}`.
-2. **Checked.** The route rejects a missing, empty, or oversized `text` with a `400` instead
-   of crashing, and assigns the submission a fresh `content_id`.
+2. **Checked.** The route rejects a body that isn't a JSON object, or a `text` that's missing,
+   not a string, empty, over 50,000 characters, or too short to score, with a `400` instead
+   of crashing. Then it assigns the submission a fresh `content_id`.
 3. **Signal one — the model signal.** gpt2, running locally, measures the text's perplexity
    (how predictable it is). `detector.model_signal` squashes that onto 0–1 as `model_score`,
    where higher means more AI-like.
@@ -115,9 +116,51 @@ look more varied just because they're short.
 <!-- Write the rule in words, then give the numbers. What happens when the two
      signals disagree? -->
 
-**The rule:**
+**The rule:** Average the two signals equally. But if they flatly disagree, meaning they're
+0.4 or more apart, the result is capped just below the AI line, so the piece can be labelled
+"unsure" at most and never "AI." Two methods disagreeing is uncertainty, and uncertainty
+isn't enough to accuse someone. The cap only pushes down: a split can still land on
+"human." I'd rather miss some AI text than wrongly accuse a writer.
 
 **The numbers:**
+
+```
+combined = 0.5 × model_score + 0.5 × style_score
+if |model_score − style_score| ≥ 0.4:
+    combined = min(combined, 0.74)        # just under AI_THRESHOLD (0.75)
+```
+
+Inside the style signal, its three measures are weighted
+`0.5 × sentence-length spread + 0.3 × expressive punctuation + 0.2 × type–token ratio`, each
+first mapped onto 0–1 "AI-likeness" (`stylometry.py::style_components`). I left the model
+signal's midpoint at the starter's perplexity of 45. All of the numbers live in
+`config.py` (`WEIGHT_MODEL_SIGNAL`, `WEIGHT_STYLE_SIGNAL`, `DISAGREEMENT_GAP`) and
+`stylometry.py`.
+
+Equal weights, because neither signal deserves more trust: the model signal accuses plain
+writers, and the style signal is fooled by anything that changes the text's shape.
+
+**Calibration** (the four Milestone 4 inputs, plus a second AI and a second human text):
+
+| Input | model_score | style_score | combined | label |
+|---|---|---|---|---|
+| Clearly AI (an AI "explainer" paragraph) | 0.751 | 1.000 | 0.876 | AI |
+| Clearly AI #2 (exercise explainer) | 0.936 | 0.938 | 0.937 | AI |
+| Clearly human (grandmother's button tin) | 0.417 | 0.163 | 0.290 | human |
+| Clearly human #2 (late bus) | 0.482 | 0.138 | 0.310 | human |
+| **Plain conventional human** (second-language writer) | **0.906** | **0.756** | **0.831** | **AI ✗** |
+| Lightly edited AI | 0.641 | 0.685 | 0.663 | unsure |
+
+The plain human paragraph is the false positive from my Milestone 1 trace, and it happens
+for real. Both signals read short, even sentences with common words as machine-like, so they
+agree, and no combining rule can rescue a writer when both signals are wrong in the same
+direction. The label wording and the appeal path are what protect this writer.
+
+One thing calibration changed: **type–token ratio pointed the opposite way from what I
+expected.** AI explainer prose scored the *highest* vocabulary variety (0.95), because it's
+full of distinct abstract nouns. The plain human paragraph scored the lowest (0.76). So in my
+style signal, higher type–token ratio counts as more AI-like, and it gets the smallest weight
+because it's the least intuitive of the three measures.
 
 **Where it lives:** `scoring.py::combine_signals`
 
@@ -126,7 +169,20 @@ look more varied just because they're short.
 
 **A case where my two signals split, and what my rule does with it:**
 
+> *"I didn't want to go. I really didn't. But my mom said I had to go to the party because it
+> was my cousin's birthday and the whole family was going to be there, so I put on my good
+> shoes and got in the car. It was fine. Actually it was fun. Don't tell her that."*
 
+`model_score` **0.891** (AI-like: the words are all common and predictable) versus
+`style_score` **0.000** (human: wildly uneven sentences, contractions, punctuation). They're
+0.89 apart, so the disagreement cap applies. The average, 0.446, is already below the cap,
+so the result is **unsure**. That's what I want: plain vocabulary alone shouldn't get a
+person accused.
+
+The opposite split exists too, and it's the one an attacker would use. AI text with typos
+added scores `model_score` **0.114**, because typos surprise gpt2, and `style_score`
+**1.000**. My rule makes that **unsure** (0.557) rather than AI. That's a miss I'm choosing
+to accept.
 
 ---
 
@@ -139,16 +195,34 @@ look more varied just because they're short.
 
 | Label | Score range | The exact text a reader sees |
 |---|---|---|
-| high-confidence human |  |  |
-| unsure |  |  |
-| high-confidence AI |  |  |
+| high-confidence human | 0.00 – 0.40 | This reads like it was written by a person. Nothing in it suggests it was generated by AI. |
+| unsure | 0.40 – 0.75 | We can't tell either way. Our checks gave mixed or middling results, which happens a lot with genuine human writing, so this is not a finding that AI was used. Nothing has been flagged, and no one will act on this result alone. |
+| high-confidence AI | 0.75 – 1.00 | Our checks found strong signs that this may have been generated by AI. This is an automated estimate, not proof, and it can be wrong, especially for plain or simple writing. If you wrote this yourself, you can appeal and a person will review it. |
+
+The boundaries: a score below 0.40 is human, a score from 0.40 up to but not including 0.75
+is unsure, and 0.75 or above is AI. There are no gaps. The Sample Run below reaches all
+three labels.
+
+The unsure band is wide (0.35 of the scale) and sits high on purpose. It takes a strong,
+agreeing signal to reach "AI."
 
 **Why I worded the "unsure" one this way:**
 <!-- It's the hardest of the three. It has to admit uncertainty without
      sounding like an accusation, because the person reading it may well have
      written every word themselves. -->
 
+Someone reading "unsure" about their own work will hear "we suspect you" unless the label
+explicitly says otherwise. So it does three things:
+1. It says plainly that we **can't tell**, rather than "possibly AI."
+2. It says mixed results **happen a lot with genuine human writing**, so the reader knows
+   this is normal and not a mark against them.
+3. It says **nothing has been flagged** and no one will act on this alone, which answers
+   "what happens to me now?"
 
+It never uses "suspicious," "detected," or a percentage. The AI label is careful too: it says
+"may have been," "not proof," names plain writing as a known weak spot, and points to the
+appeal. A writer who gets that label wrongly should finish reading it knowing exactly what to
+do.
 
 ---
 
@@ -159,19 +233,24 @@ look more varied just because they're short.
 
 **A submission**
 
-<!-- The response needs content_id, guess, confidence, label, AND both
-     signal scores - model_score and style_score. Unit 8's tools read those
-     two off the response, so leaving them out costs you next unit's
-     diagnostics. -->
+This is the plain human paragraph, the writer my service is most likely to get wrong. It does
+get it wrong:
 
 ```bash
 $ curl -X POST http://127.0.0.1:5000/submit \
   -H "Content-Type: application/json" \
-  -d '{"text": "...", "creator_id": "..."}'
+  -d '{"text": "I moved to this city two years ago. At first it was hard for me. I did not know many people and my English was not very good. I worked at a restaurant in the evening. In the day I went to school. Now I have some friends and I like my job. I want to finish school and get a better job. My family is proud of me.", "creator_id": "writer_04"}'
 ```
 
 ```json
+{"confidence":0.8313,"content_id":"7d86a139-f6cf-47ff-b0be-072cc0d79fbd","guess":"ai","label":"Our checks found strong signs that this may have been generated by AI. This is an automated estimate, not proof, and it can be wrong, especially for plain or simple writing. If you wrote this yourself, you can appeal and a person will review it.","model_score":0.9064,"status":"decided","style_score":0.7562}
+```
 
+The other two labels, from the same run:
+
+```json
+{"confidence":0.38,"content_id":"cdba9a66-f546-4d3c-ae44-51f2142091c5","guess":"human","label":"This reads like it was written by a person. Nothing in it suggests it was generated by AI.","model_score":0.4422,"status":"decided","style_score":0.3178}
+{"confidence":0.4456,"content_id":"7de19f32-efb1-484c-9553-fc39d03e5642","guess":"unsure","label":"We can't tell either way. Our checks gave mixed or middling results, which happens a lot with genuine human writing, so this is not a finding that AI was used. Nothing has been flagged, and no one will act on this result alone.","model_score":0.8913,"status":"decided","style_score":0.0}
 ```
 
 **An appeal**
@@ -179,11 +258,18 @@ $ curl -X POST http://127.0.0.1:5000/submit \
 ```bash
 $ curl -X POST http://127.0.0.1:5000/appeal \
   -H "Content-Type: application/json" \
-  -d '{"content_id": "...", "reasoning": "..."}'
+  -d '{"content_id": "7d86a139-f6cf-47ff-b0be-072cc0d79fbd", "reasoning": "I wrote this myself about my first two years here. English is my second language, so I keep my sentences simple."}'
 ```
 
 ```json
+{"content_id":"7d86a139-f6cf-47ff-b0be-072cc0d79fbd","message":"Thanks — your appeal has been recorded. A person will review this piece, and the automated result won't be used against you while they do.","original_guess":"ai","status":"under_review"}
+```
 
+An appeal against a `content_id` that doesn't exist gets a `404` and writes nothing to the
+log:
+
+```json
+{"error":"not_found","message":"No submission with content_id 'not-a-real-id'. Check it matches the one you were given."}
 ```
 
 **What the log shows afterwards**
@@ -193,8 +279,45 @@ $ curl "http://127.0.0.1:5000/log?limit=3"
 ```
 
 ```json
-
+{
+  "count": 3,
+  "entries": [
+    {
+      "combined_score": 0.4456,
+      "content_id": "7de19f32-efb1-484c-9553-fc39d03e5642",
+      "creator_id": "writer_03",
+      "guess": "unsure",
+      "label": "We can't tell either way. Our checks gave mixed or middling results, which happens a lot with genuine human writing, so this is not a finding that AI was used. Nothing has been flagged, and no one will act on this result alone.",
+      "model_score": 0.8913,
+      "status": "decided",
+      "style_score": 0.0,
+      "timestamp": "2026-11-16T07:23:30+00:00"
+    },
+    {
+      "combined_score": 0.8313,
+      "content_id": "7d86a139-f6cf-47ff-b0be-072cc0d79fbd",
+      "creator_id": "writer_04",
+      "guess": "ai",
+      "label": "Our checks found strong signs that this may have been generated by AI. This is an automated estimate, not proof, and it can be wrong, especially for plain or simple writing. If you wrote this yourself, you can appeal and a person will review it.",
+      "model_score": 0.9064,
+      "status": "decided",
+      "style_score": 0.7562,
+      "timestamp": "2026-11-16T07:23:30+00:00"
+    },
+    {
+      "content_id": "7d86a139-f6cf-47ff-b0be-072cc0d79fbd",
+      "creator_id": "writer_04",
+      "event": "appeal",
+      "reasoning": "I wrote this myself about my first two years here. English is my second language, so I keep my sentences simple.",
+      "status": "under_review",
+      "timestamp": "2026-11-16T07:23:40+00:00"
+    }
+  ]
+}
 ```
+
+The original decision is still there, unchanged. The appeal sits after it and moves the item
+to `under_review`.
 
 ---
 
@@ -202,15 +325,26 @@ $ curl "http://127.0.0.1:5000/log?limit=3"
 
 **Moment 1**
 
-- *What I asked for:*
-- *What came back:*
-- *What I changed:*
+- *What I asked for:* How to validate the input to `/submit`. I knew it had to reject missing,
+  empty and oversized text, but not how to structure the checks.
+- *What came back:* A series of "check, then return a `400`" blocks, with an explanation of why
+  the "is it a string" check has to come before `.strip()`. Otherwise `None.strip()` crashes
+  with a `500`, the exact failure my criterion 5 rules out.
+- *What I changed:* I kept the starter's `request.get_json(silent=True) or {}` instead of
+  removing the `or {}`. A body that isn't JSON at all still gets a `400`, just with the "text
+  is required" message. I also put `body.json`, my scratch file for testing bad inputs, in
+  `.gitignore` so it never gets committed.
 
 **Moment 2**
 
-- *What I asked for:*
-- *What came back:*
-- *What I changed:*
+- *What I asked for:* With time running short, a draft of the second signal, the combining
+  rule, the labels and `/appeal`.
+- *What came back:* Code, plus calibration numbers on six texts. The calibration showed that
+  type–token ratio runs the opposite way from the textbook assumption, and that my plain human
+  paragraph is labelled AI by both signals at once.
+- *What I changed:* <!-- TODO (you): fill this in honestly. Something you reworded, a number
+  you moved, or a label you rewrote. If you changed nothing, say what you checked and why you
+  kept it. -->
 
 <!-- ═══════════════════════ UNIT 8 — THE TEST ═══════════════════════ -->
 
