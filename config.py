@@ -58,6 +58,11 @@ MAX_TEXT_CHARS = 50_000
 WEIGHT_MODEL_SIGNAL = 0.5
 WEIGHT_STYLE_SIGNAL = 0.5
 
+# When the two signals are at least this far apart, they flatly disagree, and
+# the combined score is capped just under AI_THRESHOLD: disagreement can make a
+# piece "unsure", but it can never make it a high-confidence AI accusation.
+DISAGREEMENT_GAP = 0.4
+
 
 # ─── Thresholds (Milestone 5) ────────────────────────────────────────────────
 # Where one label becomes another. Scores run 0.0 (confidently human) to 1.0
@@ -72,8 +77,8 @@ WEIGHT_STYLE_SIGNAL = 0.5
 # getting through. There is no setting that avoids the trade — only settings
 # that decide who pays for it.
 
-HUMAN_THRESHOLD = 0.35
-AI_THRESHOLD = 0.65
+HUMAN_THRESHOLD = 0.40
+AI_THRESHOLD = 0.75
 
 # ⚠️ One thing that catches people out in Milestone 5. A weighted average can
 # only land between its two inputs — so while `style_signal` is still the stub

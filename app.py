@@ -30,6 +30,9 @@ from flask import Flask, jsonify, request
 
 import audit
 import config
+import detector
+import scoring
+import stylometry
 
 app = Flask(__name__)
 
@@ -155,7 +158,6 @@ def health():
 def submit():
     """
     Take a piece of text, decide about it, log the decision, answer.
-    ← TODO — Milestones 3, 4 and 5
 
     Expects JSON:
         {"text": "...", "creator_id": "..."}
@@ -239,20 +241,48 @@ def submit():
 
     content_id = str(uuid.uuid4())
 
+    # Signal one: how predictable gpt2 finds the text (0 human-ish … 1 AI-ish).
+    try:
+        model_score = detector.model_signal(text)
+    except ValueError as exc:
+        # Too short to score (under 3 tokens): the caller's problem, so 400.
+        return jsonify({"error": "bad_request", "message": str(exc)}), 400
+    except detector.DetectorUnavailable as exc:
+        # Model not downloaded or failed to load: our problem, so 503.
+        return jsonify({"error": "detector_unavailable", "message": str(exc)}), 503
+
+    # Signal two: the shape of the text (0 human-ish … 1 AI-ish).
+    style_score = stylometry.style_signal(text)
+
+    # Combine, then turn the number into words a writer can read.
+    combined_score = scoring.combine_signals(model_score, style_score)
+    guess, label = scoring.score_to_label(combined_score)
+
+    audit.log_decision(
+        content_id=content_id,
+        creator_id=creator_id,
+        guess=guess,
+        model_score=model_score,
+        style_score=style_score,
+        combined_score=combined_score,
+        label=label,
+    )
+
     return jsonify({
         "content_id": content_id,
-        "guess": "human",
-        "confidence": 0.7,
-        "label": "placeholder label",
-        "model_score": 1,
-        "style_score": 1,
+        "guess": guess,
+        "confidence": combined_score,   # the combined 0-1 score; higher = more likely AI
+        "label": label,
+        "model_score": model_score,
+        "style_score": style_score,
+        "status": "decided",
     })
 
 
 @app.post("/appeal")
 def appeal():
     """
-    A writer says you got it wrong. ← TODO — Milestone 5
+    A writer says you got it wrong.
 
     Expects JSON:
         {"content_id": "...", "reasoning": "..."}
@@ -269,14 +299,62 @@ def appeal():
     to the person on the other end. It's the only thing standing between a
     wrong accusation and nothing at all.
     """
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({
+            "error": "bad_request",
+            "message": 'Send a JSON object like {"content_id": "...", "reasoning": "..."}.',
+        }), 400
 
-    # TODO: delete this and build the route.
+    content_id = payload.get("content_id")
+    reasoning = payload.get("reasoning")
+
+    if not isinstance(content_id, str) or not content_id.strip():
+        return jsonify({
+            "error": "bad_request",
+            "message": "'content_id' is required — it's in the response you got when you submitted.",
+        }), 400
+
+    if not isinstance(reasoning, str) or not reasoning.strip():
+        return jsonify({
+            "error": "bad_request",
+            "message": "'reasoning' is required — tell us briefly why you think the result is wrong.",
+        }), 400
+
+    content_id = content_id.strip()
+
+    # 1. The content_id has to be one we actually decided on. A typo should be
+    #    a clear 404, not a silent "success" against nothing — and it writes
+    #    nothing to the log.
+    history = audit.entries_for(content_id)
+    decisions = [e for e in history if e.get("event") is None]
+    if not decisions:
+        return jsonify({
+            "error": "not_found",
+            "message": f"No submission with content_id '{content_id}'. Check it matches the one you were given.",
+        }), 404
+
+    original = decisions[-1]
+
+    # 2. Record the appeal. The log is append-only: the original decision stays
+    #    where it is, and this entry moves the item to under_review.
+    audit.log_appeal(
+        content_id=content_id,
+        creator_id=original.get("creator_id", "unknown"),
+        reasoning=reasoning.strip(),
+    )
+
+    # 3. Confirm to the writer.
     return jsonify({
-        "error": "not_implemented",
-        "message": "POST /appeal isn't built yet — see the TODO in app.py.",
-        "you_sent": payload,
-    }), 501
+        "content_id": content_id,
+        "status": "under_review",
+        "message": (
+            "Thanks — your appeal has been recorded. A person will review this "
+            "piece, and the automated result won't be used against you while "
+            "they do."
+        ),
+        "original_guess": original.get("guess"),
+    })
 
 
 # ── Already works ─────────────────────────────────────────────────────────────
